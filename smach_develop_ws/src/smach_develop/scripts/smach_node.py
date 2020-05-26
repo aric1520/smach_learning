@@ -28,6 +28,16 @@ class DanceCheck(smach.State):
         rospy.sleep(3.0)
         return 'dance_check_ok'
 
+
+class PlatformCheck(smach.State):
+    def __init__(self):
+        smach.State.__init__(self, outcomes=['platform_check_ok'])
+
+    def execute(self, userdata):
+        rospy.loginfo('Executing state PlatformCheck')
+        rospy.sleep(3.0)
+        return 'platform_check_ok'
+
 # define state GraspCheck
 
 
@@ -57,6 +67,16 @@ class NaviCheck(smach.State):
 def monitor_cb(ud, msg):
     rospy.loginfo("receive monitor msg")
     return False
+
+
+def platform_monitor_cb(ud, msg):
+    rospy.loginfo("receive platform monitor msg")
+    return False
+
+
+def platform_resume_monitor_cb(ud, msg):
+    rospy.loginfo("receive platform resume monitor msg")
+    return True
 
 
 def result_cb(data):
@@ -101,21 +121,13 @@ def sys_child_term_cb(outcome_map):
 
 def sys_out_cb(outcome_map):
     if outcome_map['PLATFORMSTATE'] == 'invalid':
-        return 'hardware_error'
+        rospy.loginfo('sys out cb platform')
+        return 'platform_error'
     elif outcome_map['SERIVCING'] == 'invalid':
         return 'software_error'
     else:
-        return 'hardware_error'
-
-
-class PlatformCheck(smach.State):
-    def __init__(self):
-        smach.State.__init__(self, outcomes=['platform_check_ok'])
-
-    def execute(self, userdata):
-        rospy.loginfo('Executing state PlatformCheck')
-        rospy.sleep(3.0)
-        return 'platform_check_ok'
+        rospy.loginfo('sys out default')
+        return 'platform_error'
 
 
 def main():
@@ -129,10 +141,13 @@ def main():
     with sm_top:
 
         sm_sys_con = smach.Concurrence(
-            outcomes=['hardware_error', 'software_error'],
-            default_outcome='hardware_error',
+            outcomes=['platform_error', 'software_error'],
+            default_outcome='platform_error',
             child_termination_cb=sys_child_term_cb,
-            outcome_cb=sys_out_cb)
+            outcome_map={
+                'platform_error': {'PLATFORMSTATE': 'platform_error'},
+                'software_error': {'SERIVCING': 'software_error'}
+            })
         with sm_sys_con:
 
             # Create the top level SMACH state machine
@@ -145,12 +160,13 @@ def main():
                                        transitions={'hardware_check_ok': 'IDLE'})
 
                 # Create the sub SMACH state machine
-                sm_con = smach.Concurrence(outcomes=['dance_service', 'grasp_service',
-                                                     'navi_service', 'shutdown',
-                                                     'no_service'],
-                                           default_outcome='no_service',
-                                           child_termination_cb=child_term_cb,
-                                           outcome_cb=out_cb)
+                sm_con = smach.Concurrence(
+                    outcomes=['dance_service', 'grasp_service',
+                              'navi_service', 'shutdown',
+                              'no_service'],
+                    default_outcome='no_service',
+                    child_termination_cb=child_term_cb,
+                    outcome_cb=out_cb)
 
                 # Open the container
                 with sm_con:
@@ -212,22 +228,40 @@ def main():
             smach.Concurrence.add('SERIVCING', sm_service)
 
             sm_platform = smach.StateMachine(
-                outcomes=['hardware_error'])
+                outcomes=['platform_error'])
             with sm_platform:
                 smach.StateMachine.add(
                     'PLATFORMCHECK', PlatformCheck(),
                     transitions={'platform_check_ok': 'PLATFORM_RUNNING'})
                 smach.StateMachine.add(
-                    'PLATFORM_RUNNING', smach_ros.MonitorState(
-                        "/platform_running_status", Empty, monitor_cb),
+                    'PLATFORM_RUNNING',
+                    smach_ros.MonitorState(
+                        "/platform_running_status",
+                        Empty, platform_monitor_cb),
                     transitions={
-                        'invalid': 'hardware_error',
-                        'valid': 'hardware_error',
-                        'preempted': 'hardware_error'})
+                        'invalid': 'platform_error',
+                        'valid': 'platform_error',
+                        'preempted': 'platform_error'})
             smach.Concurrence.add('PLATFORMSTATE', sm_platform)
         smach.StateMachine.add('WHOLE_SYSTEM', sm_sys_con,
-                               transitions={'hardware_error': 'END',
-                                            'software_error': 'END'})
+                               transitions={'platform_error': 'ZOMBIE',
+                                            'software_error': 'ZOMBIE'})
+        sm_zombie = smach.StateMachine(
+            outcomes=['power_off', 'resume'])
+        with sm_zombie:
+            smach.StateMachine.add(
+                'PLATFORM_CHECK', PlatformCheck(),
+                transitions={'platform_check_ok': 'PLATFORM_STATE_LISTENING'})
+            smach.StateMachine.add(
+                'PLATFORM_STATE_LISTENING', smach_ros.MonitorState(
+                    "/platform_resume", Empty, platform_resume_monitor_cb),
+                transitions={
+                    'invalid': 'power_off',
+                    'valid': 'resume',
+                    'preempted': 'power_off'})
+        smach.StateMachine.add('ZOMBIE', sm_zombie,
+                               transitions={'power_off': 'END',
+                                            'resume': 'WHOLE_SYSTEM'})
 
     sis = smach_ros.IntrospectionServer('smach_server', sm_top, '/SM_ROOT')
     sis.start()
