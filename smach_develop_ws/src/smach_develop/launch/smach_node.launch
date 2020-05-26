@@ -1,0 +1,3 @@
+<launch> 
+    <node name="smach_develop" pkg="smach_develop" type="smach_node.py" respawn="false" output="screen"/>
+</launch>
