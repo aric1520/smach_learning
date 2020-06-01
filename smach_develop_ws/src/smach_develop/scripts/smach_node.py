@@ -76,7 +76,7 @@ def platform_monitor_cb(ud, msg):
 
 def platform_resume_monitor_cb(ud, msg):
     rospy.loginfo("receive platform resume monitor msg")
-    return True
+    return False
 
 
 def result_cb(data):
@@ -85,15 +85,20 @@ def result_cb(data):
 
 
 def child_term_cb(outcome_map):
-    if outcome_map['DANCE_READY'] == 'invalid':
+    if outcome_map['DANCE_READY'] == 'invalid' or outcome_map['DANCE_READY'] == 'preempted':
+        rospy.loginfo("DANCE_READY child_term_cb")
         return True
-    elif outcome_map['GRASP_READY'] == 'invalid':
+    elif outcome_map['GRASP_READY'] == 'invalid' or outcome_map['GRASP_READY'] == 'preempted':
+        rospy.loginfo("GRASP_READY child_term_cb")
         return True
-    elif outcome_map['NAVI_READY'] == 'invalid':
+    elif outcome_map['NAVI_READY'] == 'invalid' or outcome_map['NAVI_READY'] == 'preempted':
+        rospy.loginfo("NAVI_READY child_term_cb")
         return True
-    elif outcome_map['SYSTEM_STATUS'] == 'invalid':
+    elif outcome_map['SYSTEM_STATUS'] == 'invalid' or outcome_map['NAVI_READY'] == 'preempted':
+        rospy.loginfo("SYSTEM_STATUS child_term_cb")
         return True
     else:
+        rospy.loginfo("child_term_cb")
         return False
 
 
@@ -106,24 +111,33 @@ def out_cb(outcome_map):
         return 'navi_service'
     elif outcome_map['SYSTEM_STATUS'] == 'invalid':
         return 'shutdown'
+    elif (outcome_map['DANCE_READY'] == 'preempted'
+          and outcome_map['GRASP_READY'] == 'preempted'
+          and outcome_map['NAVI_READY'] == 'preempted'
+          and outcome_map['SYSTEM_STATUS'] == 'preempted'):
+        return 'shutdown'
     else:
         return 'no_service'
 
 
 def sys_child_term_cb(outcome_map):
-    if outcome_map['SERIVCING'] == 'invalid':
+    if outcome_map['SERIVCING'] == 'serivce_error':
+        rospy.loginfo('SERIVCING sys_child_term_cb cb platform')
         return True
-    elif outcome_map['PLATFORMSTATE'] == 'invalid':
+    elif outcome_map['PLATFORMSTATE'] == 'platform_error':
+        rospy.loginfo('PLATFORMSTATE sys_child_term_cb cb platform')
         return True
     else:
+        rospy.loginfo('nothing sys_child_term_cb cb platform')
         return False
 
 
 def sys_out_cb(outcome_map):
-    if outcome_map['PLATFORMSTATE'] == 'invalid':
+    if outcome_map['PLATFORMSTATE'] == 'platform_error':
         rospy.loginfo('sys out cb platform')
         return 'platform_error'
-    elif outcome_map['SERIVCING'] == 'invalid':
+    elif outcome_map['SERIVCING'] == 'serivce_error':
+        rospy.loginfo('sys out cb service')
         return 'software_error'
     else:
         rospy.loginfo('sys out default')
@@ -144,14 +158,11 @@ def main():
             outcomes=['platform_error', 'software_error'],
             default_outcome='platform_error',
             child_termination_cb=sys_child_term_cb,
-            outcome_map={
-                'platform_error': {'PLATFORMSTATE': 'platform_error'},
-                'software_error': {'SERIVCING': 'software_error'}
-            })
+            outcome_cb=sys_out_cb)
         with sm_sys_con:
 
             # Create the top level SMACH state machine
-            sm_service = smach.StateMachine(outcomes=['software_error'])
+            sm_service = smach.StateMachine(outcomes=['serivce_error'])
 
             # Open the container
             with sm_service:
@@ -187,7 +198,7 @@ def main():
                                                     'dance_service': 'DANCE',
                                                     'grasp_service': 'GRASP',
                                                     'navi_service': 'NAVIGATE',
-                                                    'shutdown': 'software_error'})
+                                                    'shutdown': 'serivce_error'})
 
                 sm_dancing = smach.StateMachine(
                     outcomes=['dance_done'])
@@ -256,8 +267,8 @@ def main():
                 'PLATFORM_STATE_LISTENING', smach_ros.MonitorState(
                     "/platform_resume", Empty, platform_resume_monitor_cb),
                 transitions={
-                    'invalid': 'power_off',
-                    'valid': 'resume',
+                    'valid': 'power_off',
+                    'invalid': 'resume',
                     'preempted': 'power_off'})
         smach.StateMachine.add('ZOMBIE', sm_zombie,
                                transitions={'power_off': 'END',

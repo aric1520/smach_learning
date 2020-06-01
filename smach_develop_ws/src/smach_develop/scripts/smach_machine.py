@@ -6,6 +6,7 @@ import time
 import rospy
 import smach
 import smach_ros
+from std_msgs.msg import Empty
 from twisted.internet.defer import succeed
 
 
@@ -116,96 +117,71 @@ class ConcurrentExample:
         with self.sm_top:
 
             smach.StateMachine.add('BAS', Bas(),
-                                   transitions={'succeeded': 'CON'})
+                                   transitions={'succeeded': 'ZOMBIE'})
 
-            # Create the sub SMACH state machine
-            self.sm_con = smach.Concurrence(outcomes=['succeeded', 'preempted', 'aborted'],
-                                            default_outcome='aborted',
-                                            # outcome_map = {'succeeded':{'FOO':'succeeded'},
-                                            #                 'aborted':{'FOO':'aborted'}},
-                                            child_termination_cb=self.child_term_cb,
-                                            outcome_cb=self.out_cb
-                                            )
+            sm_zombie = smach.StateMachine(
+                outcomes=['power_off', 'resume'])
+            with sm_zombie:
+                smach.StateMachine.add(
+                    'PLATFORM_CHECK', PlatformCheck(),
+                    transitions={'platform_check_ok': 'PLATFORM_STATE_LISTENING'})
+                smach.StateMachine.add(
+                    'PLATFORM_STATE_LISTENING', smach_ros.MonitorState(
+                        "/platform_resume", Empty, platform_resume_monitor_cb),
+                    transitions={
+                        'invalid': 'power_off',
+                        'valid': 'resume',
+                        'preempted': 'power_off'})
+            smach.StateMachine.add('ZOMBIE', sm_zombie,
+                                   transitions={'power_off': 'END',
+                                                'resume': 'BAS'})
 
-            # Open the container
-            with self.sm_con:
-                # Add states to the container
-                smach.Concurrence.add('FOO', Foo())
 
-                self.sm_bar = smach.StateMachine(
-                    outcomes=['succeeded', 'preempted', 'aborted'])
-                with self.sm_bar:
-                    smach.StateMachine.add('BAR1', Bar1(),
-                                           transitions={'succeeded': 'BAR2', 'preempted': 'preempted'})
-                    smach.StateMachine.add('BAR2', Bar2(),
-                                           transitions={'succeeded': 'BAR3', 'preempted': 'preempted'})
-                    smach.StateMachine.add('BAR3', Bar3(),
-                                           transitions={'succeeded': 'succeeded', 'preempted': 'preempted'})
-                self.sm_bar.register_transition_cb(
-                    self.bar_transition_cb, cb_args=[])
-                smach.Concurrence.add('BAR', self.sm_bar)
+def platform_resume_monitor_cb(ud, msg):
+    rospy.loginfo("receive platform resume monitor msg")
+    return False
 
-            smach.StateMachine.add('CON', self.sm_con,
-                                   transitions={'succeeded': 'stop',
-                                                'aborted': 'stop',
-                                                'preempted': 'CHARGE'})
 
-            smach.StateMachine.add('CHARGE', Charge(),
-                                   transitions={'succeeded': 'CON'})
+class PlatformCheck(smach.State):
+    def __init__(self):
+        smach.State.__init__(self, outcomes=['platform_check_ok'])
 
-         # Create and start the introspection server
-        sis = smach_ros.IntrospectionServer(
-            'server_name', self.sm_top, '/SM_ROOT')
-        sis.start()
-
-        # Execute SMACH plan
-        outcome = self.sm_top.execute()
-        rospy.spin()
-        sis.stop()
-
-    # 状态之间转换的时候会调用该函数。比如BAR1转换到BAR2（或者BAR2转换到BAR3）后，执行该回调函数，
-    # 那么活动的状态 active_states 是‘BAR2‘（‘BAR3‘）
-    def bar_transition_cb(self, userdata, active_states, *cb_args):
-        print active_states  # 注意这里是字符串，活动状态的标识符例如‘BAR’
-        self.last_bar_state = active_states
-
-    # gets called when ANY child state terminates,
-    # 只要Concurent下的其中一个状态完成，都会出发该回调函数
-    def child_term_cb(self, outcome_map):
-
-        # terminate all running states if FOO preempted with outcome 'succeeded'
-        if outcome_map['FOO'] == 'succeeded':
-            print "child_term_cv:FOO finished"
-            if self.last_bar_state is not None:
-
-                self.sm_bar.set_initial_state(
-                    self.last_bar_state, smach.UserData())
-            return True
-
-        # terminate all running states if BAR preempted
-        if outcome_map['BAR'] == 'succeeded' or outcome_map['BAR'] == 'preempted':
-            print "child_term_cv:SM_BAR finished"
-
-            return True
-
-        # in all other case, just keep running, don't terminate anything
-        return False
-
-    # gets called when ALL child states are terminated，只要Concurrent下的状态都结束了，
-    # 调用该函数.注意不是BAR下面的BAR1，BAR2，BAR3的之一完成
-
-    def out_cb(self, outcome_map):
-        if outcome_map['FOO'] == 'aborted':
-            print "out_cb FOO aborted"
-            return 'aborted'
-        elif outcome_map['BAR'] == 'preempted':
-
-            print "out_cb BAR preempted"
-            return 'preempted'
-        elif outcome_map['BAR'] == 'succeeded':
-            print "out_cb_BAR succeeded"
-            return 'succeeded'
+    def execute(self, userdata):
+        rospy.loginfo('Executing state PlatformCheck')
+        rospy.sleep(3.0)
+        return 'platform_check_ok'
 
 
 if __name__ == '__main__':
-    ConcurrentExample()
+    rospy.init_node('smach_example_state_machine')
+
+    sm_top = smach.StateMachine(outcomes=['stop'])
+
+    # Open the container
+    with sm_top:
+
+        smach.StateMachine.add('BAS', Bas(),
+                               transitions={'succeeded': 'ZOMBIE'})
+
+        sm_zombie = smach.StateMachine(
+            outcomes=['power_off', 'resume'])
+        with sm_zombie:
+            smach.StateMachine.add(
+                'PLATFORM_CHECK', PlatformCheck(),
+                transitions={'platform_check_ok': 'PLATFORM_STATE_LISTENING'})
+            smach.StateMachine.add(
+                'PLATFORM_STATE_LISTENING', smach_ros.MonitorState(
+                    "/platform_resume", Empty, platform_resume_monitor_cb),
+                transitions={
+                    'valid': 'power_off',
+                    'invalid': 'resume',
+                    'preempted': 'power_off'})
+        smach.StateMachine.add('ZOMBIE', sm_zombie,
+                               transitions={'power_off': 'stop',
+                                            'resume': 'BAS'})
+    sis = smach_ros.IntrospectionServer('smach_server', sm_top, '/SM_ROOT')
+    sis.start()
+    # Execute SMACH plan
+    outcome = sm_top.execute()
+    rospy.spin()
+    sis.stop()
